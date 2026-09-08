@@ -1,0 +1,16 @@
+node_modules
+dist
+data
+test
+.git
+.gitignore
+.github
+.env
+.env.*
+*.log
+*.md
+docs
+docker-compose*.yml
+eslint.config.js
+.prettierrc
+.prettierignore

@@ -1,0 +1,43 @@
+{
+  "name": "twincast",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Twincast - an info-screen board for the Beckhoff TwinCAT RSS release feed",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "main": "dist/src/server.js",
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prebuild": "npm run clean",
+    "build": "tsc -p tsconfig.build.json",
+    "watch": "tsc -p tsconfig.build.json --watch",
+    "start": "node dist/src/server.js",
+    "dev": "node --watch dist/src/server.js",
+    "poll": "node dist/src/cli-poll.js",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test \"dist/test/**/*.test.js\"",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run typecheck && npm run lint && npm run format:check && npm test",
+    "pretest": "npm run clean"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.11.1",
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.13.3",
+    "eslint": "^10.10.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^16.5.0",
+    "prettier": "^3.9.6",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0"
+  }
+}

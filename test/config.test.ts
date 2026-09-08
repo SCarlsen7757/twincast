@@ -23,13 +23,26 @@ describe('numeric coercion', () => {
     assert.equal(loadConfig({ PORT: '9000' }).port, 9000);
   });
 
-  // The guard is `> 0`, so zero and negatives fall back rather than binding to
-  // an ephemeral port or a nonsensical interval.
-  test('falls back on zero, negatives and non-numbers', () => {
-    assert.equal(loadConfig({ PORT: '0' }).port, 8080);
-    assert.equal(loadConfig({ PORT: '-5' }).port, 8080);
-    assert.equal(loadConfig({ PORT: 'abc' }).port, 8080);
-    assert.equal(loadConfig({ PORT: '' }).port, 8080);
+  test('rejects invalid explicit settings with the variable name', () => {
+    for (const value of ['0', '-5', 'abc', '', '65536', '80.5', 'Infinity']) {
+      assert.throws(() => loadConfig({ PORT: value }), /PORT/);
+    }
+    for (const key of ['HERO_COUNT', 'RAIL_COUNT']) {
+      for (const value of ['1.5', '9', '0'])
+        assert.throws(() => loadConfig({ [key]: value }), new RegExp(key));
+    }
+    for (const [key, value] of [
+      ['ROTATE_SECONDS', '4'],
+      ['ROTATE_SECONDS', '301'],
+      ['ROTATE_SECONDS', '5.5'],
+      ['POLL_INTERVAL_MIN', '0.01'],
+      ['POLL_INTERVAL_MIN', '1441'],
+      ['STALE_AFTER_MIN', '10081'],
+    ]) {
+      assert.ok(key);
+      assert.ok(value);
+      assert.throws(() => loadConfig({ [key]: value }), new RegExp(key));
+    }
   });
 
   test('accepts a fractional value', () => {

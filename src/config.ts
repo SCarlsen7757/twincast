@@ -1,9 +1,28 @@
 import { dirname } from 'node:path';
 
-const num = (v: string | undefined, d: number): number => {
-  const n = Number(v);
-  return Number.isFinite(n) && n > 0 ? n : d;
-};
+function numberSetting(
+  env: NodeJS.ProcessEnv,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+  integer = true,
+): number {
+  if (env[key] === undefined) return fallback;
+  const n = Number(env[key]);
+  if (
+    !env[key]?.trim() ||
+    !Number.isFinite(n) ||
+    n < min ||
+    n > max ||
+    (integer && !Number.isInteger(n))
+  ) {
+    throw new Error(
+      `${key} must be ${integer ? 'an integer' : 'a number'} between ${min} and ${max}`,
+    );
+  }
+  return n;
+}
 const bool = (v: string | undefined, d: boolean): boolean =>
   v === undefined ? d : /^(1|true|yes|on)$/i.test(v);
 
@@ -26,15 +45,15 @@ export interface Config {
  */
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
-    port: num(env.PORT, 8080),
+    port: numberSetting(env, 'PORT', 8080, 1, 65535),
     feedUrl: env.FEED_URL || 'https://www.beckhoff.com/english/rss/beckhoff-twincat-rss-feed.xml',
-    pollIntervalMin: num(env.POLL_INTERVAL_MIN, 30),
+    pollIntervalMin: numberSetting(env, 'POLL_INTERVAL_MIN', 30, 0.1, 1440, false),
     pollOnStart: bool(env.POLL_ON_START, true),
     dbPath: env.DB_PATH || './data/board.db',
-    heroCount: num(env.HERO_COUNT, 6),
-    railCount: num(env.RAIL_COUNT, 8),
-    rotateSeconds: num(env.ROTATE_SECONDS, 25),
-    staleAfterMin: num(env.STALE_AFTER_MIN, 120),
+    heroCount: numberSetting(env, 'HERO_COUNT', 6, 1, 8),
+    railCount: numberSetting(env, 'RAIL_COUNT', 8, 1, 8),
+    rotateSeconds: numberSetting(env, 'ROTATE_SECONDS', 25, 5, 300),
+    staleAfterMin: numberSetting(env, 'STALE_AFTER_MIN', 120, 1, 10080, false),
     // Honest, self-identifying agent. Beckhoff's WAF rejects `curl/*` with 403 but
     // accepts this; we identify ourselves rather than impersonating a browser.
     userAgent: env.USER_AGENT || 'Twincast/1.0 (+https://github.com/SCarlsen7757/twincast)',

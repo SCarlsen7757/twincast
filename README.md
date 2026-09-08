@@ -149,9 +149,10 @@ Two scripts exist that you should not normally need: `clean` removes `dist/`, an
 
 ### Making a release
 
-Commit directly to main if that suits your workflow. Ordinary pushes, pull requests,
-and manual dispatches do not run the release workflow. Run `npm run check` locally,
-then push a version tag when ready:
+Pull requests and pushes to main run code checks, a production build, dependency
+audit, and container smoke tests and vulnerability scans for amd64 and arm64.
+Only version-tag pushes can log in to GHCR and publish an image. Run
+`npm run check` locally, then push a version tag when ready:
 
 ```bash
 npm run check
@@ -163,7 +164,7 @@ git push origin v1.0.0
 The tag runs code checks, `npm audit --audit-level=high`, and container smoke tests
 and vulnerability scans for amd64 and arm64. Publication requires every gate to
 pass. Actions use pinned commit IDs and publishing alone gets package-write access.
-The Node base image digest is fixed for the duration of each release run.
+The Node base image digest is fixed for the duration of each workflow run.
 
 `v1.2.3` publishes `1.2.3`, `1.2`, `1`, `latest`, and `sha-<full commit SHA>` under
 `ghcr.io/scarlsen7757/twincast`. `v1.2.3-rc.1` publishes only `1.2.3-rc.1` and the

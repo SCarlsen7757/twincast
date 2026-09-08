@@ -30,8 +30,8 @@ The hero rotates through the newest `HERO_COUNT` releases every `ROTATE_SECONDS`
 ### From the published image (recommended)
 
 Multi-arch images (`linux/amd64` + `linux/arm64`) are published to GHCR by
-[`.github/workflows/publish.yml`](.github/workflows/publish.yml) on every push to
-`main` and every `v*.*.*` tag:
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml) only when a valid
+version tag such as `v1.0.0` is pushed. `latest` follows stable releases:
 
 ```bash
 docker pull ghcr.io/scarlsen7757/twincast:latest
@@ -46,6 +46,24 @@ docker compose -f docker-compose.example.yml up -d
 
 Then open <http://localhost:8080/tv>. Pin `IMAGE_TAG` to a version in `.env` for a
 screen you don't want changing under you.
+
+Both Compose files store SQLite and the cached logo in **`./data` beside the Compose
+file**, mounted at `/data` in the container. No named Docker volume is used.
+Create the directory before starting. On Linux, make it writable by the container's
+non-root user (UID/GID 1000):
+
+```bash
+mkdir -p data
+sudo chown 1000:1000 data
+docker compose -f docker-compose.example.yml up -d
+```
+
+On Docker Desktop for Windows, create `data` with `New-Item -ItemType Directory
+-Force data`; Docker Desktop manages bind-mount permissions. If startup reports
+permission denied on `/data`, check directory ownership and Docker Desktop file
+sharing. Container recreation preserves the files. For a consistent backup, stop
+the board, copy the entire `data` directory, then start it again. `data/` is excluded
+from Git and the image build context.
 
 ### Building it yourself
 
@@ -85,6 +103,8 @@ tunnel's public hostname to **Service: HTTP, URL: `board:8080`**.
 > who finds the hostname. See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
 ### Locally
+
+Use Node 24.2 or newer (Node 24 LTS is used in CI and Docker).
 
 ```bash
 npm install
@@ -127,6 +147,50 @@ before ESLint has to build a program of its own.
 Two scripts exist that you should not normally need: `clean` removes `dist/`, and
 `lint:fix` applies ESLint's autofixes.
 
+### Making a release
+
+Commit directly to main if that suits your workflow. Ordinary pushes, pull requests,
+and manual dispatches do not run the release workflow. Run `npm run check` locally,
+then push a version tag when ready:
+
+```bash
+npm run check
+git push origin main
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The tag runs code checks, `npm audit --audit-level=high`, and container smoke tests
+and vulnerability scans for amd64 and arm64. Publication requires every gate to
+pass. Actions use pinned commit IDs and publishing alone gets package-write access.
+The Node base image digest is fixed for the duration of each release run.
+
+`v1.2.3` publishes `1.2.3`, `1.2`, `1`, `latest`, and `sha-<full commit SHA>` under
+`ghcr.io/scarlsen7757/twincast`. `v1.2.3-rc.1` publishes only `1.2.3-rc.1` and the
+commit tag. SemVer build metadata uses `_` instead of `+` in Docker tags, for example
+`v1.2.3+build.1` becomes `1.2.3_build.1`. Invalid versions fail before publication.
+Push stable tags in release order: each stable release updates its aliases and
+`latest`. There is no automatic `edge` image.
+
+To exercise the same container smoke test locally:
+
+```bash
+docker buildx build --platform linux/amd64 -t twincast:smoke --load .
+node scripts/container-smoke.mjs twincast:smoke linux/amd64
+```
+
+The smoke test uses synthetic releases and a disposable bind-mounted directory;
+it does not read or change your deployment's `data` directory. Before the first
+stable release, trial a local image on the actual display for 24 hours, including
+network interruption, restart, and QR scanning.
+
+For repeatable visual checks, run `node scripts/visual-check.mjs` after compiling.
+Open `http://127.0.0.1:8097/tv?scene=default`; the other scenes are `empty`, `single`,
+`long`, `missing`, and `stale`. With Playwright installed separately, run
+`node scripts/browser-check.mjs` to check all six at 1920×1080 and save screenshots
+under `data/browser-check`. `PLAYWRIGHT_MODULE` may point to an external Playwright
+module, so browser tooling need not become an application dependency.
+
 **TypeScript is pinned to 6.x on purpose.** 7.x is the new native compiler, but no
 release of `typescript-eslint` accepts it yet — its peer range is
 `typescript >=4.8.4 <6.1.0`. Check `npm view typescript-eslint peerDependencies`
@@ -150,6 +214,23 @@ All via environment variables.
 | `TZ`                | `Europe/Copenhagen`       | Header clock                                |
 | `USER_AGENT`        | self-identifying string   | **Must not look like `curl/*`** — see below |
 
+Numeric configuration is validated at startup. Unset values use the defaults above;
+invalid explicit values fail with the variable name. Supported ranges are PORT
+1–65535, HERO_COUNT and RAIL_COUNT 1–8, ROTATE_SECONDS 5–300 (integers),
+POLL_INTERVAL_MIN 0.1–1440, and STALE_AFTER_MIN 1–10080. The last two may be
+fractional. Polling waits the configured interval after each completed attempt.
+
+Feed ingestion is bounded to 5 MiB of decompressed XML, 5,000 items and 64 KiB per
+text field. Download links accept HTTP/HTTPS only and at most 2,048 UTF-8 bytes.
+Logos accept PNG/JPEG signatures, at most 1 MiB, fetched over HTTPS from the feed's
+configured origin without redirects. A rejected logo or unavailable QR leaves the
+release text usable. Stored history is retained across polls.
+
+The board compares a content revision to detect changed releases, including new
+versions of the same product, and reloads at the next rotation wrap. Freshness ages
+locally; “Feed stale” and “Connection unavailable” distinguish old feed data from
+loss of connection to the board server.
+
 ## Endpoints
 
 | Path                | Purpose                                                                                                  |
@@ -159,6 +240,11 @@ All via environment variables.
 | `/api/news?limit=N` | JSON data contract; always succeeds, carries `stale` / `lastSuccess`                                     |
 | `/healthz`          | `200` when releases are stored, `503` otherwise; used by the Docker healthcheck                          |
 | `/logo`             | The feed's own logo, cached locally so it renders offline                                                |
+
+`/api/news` returns 25 items by default and at most 100, independently of display
+counts. Missing or invalid limits use 25; positive integer limits clamp to 100.
+Responses include `contentRevision` (SHA-256 of displayed content), freshness
+metadata and plain release items without QR markup.
 
 ## Using it with Anthias
 

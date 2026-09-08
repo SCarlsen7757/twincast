@@ -1,178 +1,123 @@
-name: Publish container image
+name: Release container image
 
 on:
   push:
-    branches: [main]
     tags: ['v*.*.*']
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
 
-env:
-  REGISTRY: ghcr.io
+permissions:
+  contents: read
 
 concurrency:
-  group: publish-${{ github.ref }}
-  cancel-in-progress: true
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Types, lint, formatting and unit tests. Runs first because it takes ~20s and
-  # catches the ordinary mistakes, where the Docker build below takes minutes.
-  # The image build would surface a type error in src/ on its own, but nothing
-  # here would otherwise check test/ -- tsconfig.build.json excludes it.
   checks:
-    name: Typecheck, lint and test
+    name: Validate release and check code
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      tags: ${{ steps.release.outputs.tags }}
+      node-image: ${{ steps.base.outputs.image }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
-
+      - name: Validate version and resolve image tags
+        id: release
+        run: node scripts/release-tags.mjs
       - run: npm ci
+      - run: npm run check
+      - run: npm audit --audit-level=high
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Freeze base image for this release
+        id: base
+        shell: bash
+        run: |
+          digest=$(docker buildx imagetools inspect node:24-alpine --format '{{json .Manifest}}' | jq -r '.digest')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=node:24-alpine@$digest" >> "$GITHUB_OUTPUT"
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Lint
-        run: npm run lint
-
-      # Guards the .gitattributes eol=lf rule. Note an ubuntu runner checks out LF
-      # regardless, so this cannot catch a Windows-only CRLF regression -- that is
-      # what .gitattributes itself is for.
-      - name: Formatting
-        run: npm run format:check
-
-      - name: Unit tests
-        run: npm test
-
-  # Build amd64 only and prove the container actually serves the board before
-  # anything is published. POLL_ON_START=false keeps this independent of Beckhoff
-  # being reachable from a GitHub runner.
   smoke:
-    name: Build and smoke test
+    name: Smoke and scan (${{ matrix.arch }})
     needs: checks
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image (amd64, loaded locally)
-        uses: docker/build-push-action@v6
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          platforms: linux/amd64
-          push: false
+          platforms: linux/${{ matrix.arch }}
+          build-args: NODE_IMAGE=${{ needs.checks.outputs.node-image }}
           load: true
+          push: false
           tags: twincast:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Run container
-        run: |
-          docker run -d --name smoke -p 8080:8080 \
-            -e POLL_ON_START=false \
-            -e DB_PATH=/data/board.db \
-            twincast:smoke
-          for i in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:8080/tv; then
-              echo "board responded after ${i}s"; exit 0
-            fi
-            sleep 1
-          done
-          echo "board never responded"; docker logs smoke; exit 1
-
-      - name: Check the routes and the empty-state contract
-        run: |
-          set -e
-          # /tv must render even with an empty database and no feed access.
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/tv)" = "200"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)" = "200"
-          # /healthz must report unhealthy while no releases are stored.
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/healthz)" = "503"
-          # The API must still answer rather than error.
-          curl -fsS http://127.0.0.1:8080/api/news | grep -q '"itemCount":0'
-          # Attribution must be present on every render, including the empty state.
-          curl -fsS http://127.0.0.1:8080/tv | grep -q 'Beckhoff Automation'
-          echo "all route checks passed"
-
-      - name: Container logs
-        if: always()
-        run: docker logs smoke || true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+      - name: Smoke test and bind-mount persistence
+        run: node scripts/container-smoke.mjs twincast:smoke linux/${{ matrix.arch }}
+      - name: Scan runtime image
+        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
+        with:
+          version: v0.74.0
+          image-ref: twincast:smoke
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+          timeout: 10m
 
   publish:
-    name: Publish to GHCR
-    needs: smoke
-    if: github.event_name != 'pull_request'
+    name: Publish checked release to GHCR
+    needs: [checks, smoke]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-
-      # GHCR image names must be lowercase, and this repository's owner
-      # (SCarlsen7757) is not. Derive the name rather than using
-      # github.repository verbatim.
-      - name: Resolve lowercase image name
-        id: image
-        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          registry: ${{ env.REGISTRY }}
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-          labels: |
-            org.opencontainers.image.title=Twincast
-            org.opencontainers.image.description=Info-screen board for the Beckhoff TwinCAT RSS release feed (unofficial)
-            org.opencontainers.image.licenses=MIT
-
-      # linux/arm64 is for the Raspberry Pi. Nothing is compiled at install time
-      # (SQLite is Node's built-in node:sqlite), so the emulated arm64 build is
-      # just dependency install plus file copies and stays fast.
-      - name: Build and push
-        uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
+          build-args: NODE_IMAGE=${{ needs.checks.outputs.node-image }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Summary
+          tags: ${{ needs.checks.outputs.tags }}
+          cache-from: |
+            type=gha,scope=amd64
+            type=gha,scope=arm64
+          labels: |
+            org.opencontainers.image.title=Twincast
+            org.opencontainers.image.description=Unofficial internal TwinCAT RSS display
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Release summary
+        env:
+          RELEASE_TAGS: ${{ needs.checks.outputs.tags }}
         run: |
-          {
-            echo "### Published"
-            echo
-            echo '```'
-            echo "${{ steps.meta.outputs.tags }}"
-            echo '```'
-            echo
-            echo "Platforms: linux/amd64, linux/arm64"
-          } >> "$GITHUB_STEP_SUMMARY"
+          printf 'Published amd64 and arm64 images:\n\n%s\n' "$RELEASE_TAGS" >> "$GITHUB_STEP_SUMMARY"

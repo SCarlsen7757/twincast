@@ -25,7 +25,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
       - name: Validate version and resolve image tags
         id: release
@@ -38,9 +38,26 @@ jobs:
         id: base
         shell: bash
         run: |
-          digest=$(docker buildx imagetools inspect node:24-alpine --format '{{json .Manifest}}' | jq -r '.digest')
+          digest=$(docker buildx imagetools inspect node:26-alpine --format '{{json .Manifest}}' | jq -r '.digest')
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=node:24-alpine@$digest" >> "$GITHUB_OUTPUT"
+          echo "image=node:26-alpine@$digest" >> "$GITHUB_OUTPUT"
+
+  minimum-node:
+    name: Check minimum Node (26.8.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26.8.1
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm audit --audit-level=high
 
   smoke:
     name: Smoke and scan (${{ matrix.arch }})
@@ -57,7 +74,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 26
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -84,7 +101,7 @@ jobs:
 
   publish:
     name: Publish checked release to GHCR
-    needs: [checks, smoke]
+    needs: [checks, minimum-node, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:

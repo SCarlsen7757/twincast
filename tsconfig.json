@@ -1,6 +1,6 @@
 {
   "compilerOptions": {
-    // Node 24 LTS is the runtime everywhere: the Docker base, CI, and `engines`.
+    // Node 26 is the runtime everywhere: the Docker base, CI, and `engines`.
     "target": "es2024",
     // No "dom": fetch/Headers/AbortSignal/Buffer/URL all come from @types/node.
     // Pulling in dom would hand this server `document` and `window`, which is

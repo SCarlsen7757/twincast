@@ -6,7 +6,7 @@
   "description": "Twincast - an info-screen board for the Beckhoff TwinCAT RSS release feed",
   "type": "module",
   "engines": {
-    "node": ">=24.2.0"
+    "node": ">=26.8.1"
   },
   "main": "dist/src/server.js",
   "scripts": {

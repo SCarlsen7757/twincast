@@ -12,6 +12,32 @@ import {
 } from '../src/parse.js';
 import { FEED_XML, SINGLE_ITEM_XML } from './fixture.js';
 
+describe('feed input limits', () => {
+  test('rejects more than 5000 items before returning data', () => {
+    const item = '<item><guid>1</guid><title>A</title></item>';
+    assert.throws(
+      () => parseFeed(`<rss><channel>${item.repeat(5001)}</channel></rss>`),
+      /5000 items/,
+    );
+  });
+
+  test('rejects oversized text fields before normalization', () => {
+    assert.throws(
+      () => parseFeed(`<rss><channel><title>${'x'.repeat(65537)}</title></channel></rss>`),
+      /64 KiB/,
+    );
+  });
+
+  test('normalizes web links and removes executable links', () => {
+    const parsed = parseFeed(
+      '<rss><channel><link>javascript:alert(1)</link><image><url>file:///secret</url></image><item><title>A</title><guid>1</guid><link>data:text/html,bad</link></item></channel></rss>',
+    );
+    assert.equal(parsed.meta.channel_link, '');
+    assert.equal(parsed.meta.channel_image, '');
+    assert.equal(parsed.items[0]?.link, '');
+  });
+});
+
 describe('extractCodes', () => {
   test('finds a plain product code', () => {
     assert.deepEqual(extractCodes('New version of TF3600 Analytics'), ['TF3600']);

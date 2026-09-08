@@ -1,4 +1,5 @@
 import qrcode from 'qrcode-generator';
+import { safeLink } from './urls.js';
 
 const cache = new Map<string, string>();
 const MAX_CACHE = 200;
@@ -12,12 +13,19 @@ const MAX_CACHE = 200;
  */
 export function qrSvg(text: string | null | undefined): string {
   if (!text) return '';
+  text = safeLink(text);
+  if (!text) return '';
   const hit = cache.get(text);
   if (hit) return hit;
 
   const qr = qrcode(0, 'M'); // type 0 = auto-size for the payload
-  qr.addData(text);
-  qr.make();
+  try {
+    qr.addData(text);
+    qr.make();
+  } catch {
+    // Bad feed links must not prevent the rest of the snapshot from rendering.
+    return '';
+  }
 
   const n = qr.getModuleCount();
   let d = '';

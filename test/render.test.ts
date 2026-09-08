@@ -96,6 +96,7 @@ const item = (over: Partial<ItemWithQr> = {}): ItemWithQr => ({
 });
 
 const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
+  apiItems: [],
   items: [item()],
   meta: {},
   itemCount: 1,
@@ -104,10 +105,35 @@ const snapshot = (over: Partial<Snapshot> = {}): Snapshot => ({
   lastError: null,
   ageSec: 10,
   stale: false,
+  contentRevision: 'a'.repeat(64),
   ...over,
 });
 
 describe('renderBoard', () => {
+  test('embeds revision and freshness inputs without inline handlers or unused counters', () => {
+    const html = renderBoard(snapshot({ stale: true }));
+    assert.ok(html.includes(`data-content-revision="${'a'.repeat(64)}"`));
+    assert.ok(html.includes('data-last-success="'));
+    assert.ok(html.includes('data-stale-after="'));
+    assert.ok(html.includes('Feed stale'));
+    assert.doesNotMatch(html, /onerror=|data-idx=|data-hero-count=/);
+  });
+
+  test('shows an honest fallback when the download link or QR is unavailable', () => {
+    for (const over of [{ qr: '' }, { link: '' }, { link: 'javascript:alert(1)' }]) {
+      const html = renderBoard(snapshot({ items: [item(over)] }));
+      assert.ok(html.includes('Download link unavailable'));
+      assert.ok(!html.includes('Scan to open'));
+      assert.ok(!html.includes('class="qr"'));
+    }
+  });
+
+  test('uses a safe attribution link even for unsafe channel metadata', () => {
+    const html = renderBoard(snapshot({ meta: { channel_link: 'javascript:alert(1)' } }));
+    assert.ok(html.includes('href="https://www.beckhoff.com/en-en/"'));
+    assert.ok(!html.includes('javascript:'));
+  });
+
   test('escapes interpolated content rather than emitting raw markup', () => {
     const html = renderBoard(snapshot({ items: [item({ name: '<script>alert(1)</script>' })] }));
     assert.ok(html.includes('&lt;script&gt;'));

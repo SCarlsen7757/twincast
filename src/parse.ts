@@ -1,5 +1,6 @@
 import { XMLParser } from 'fast-xml-parser';
 import type { ChannelMeta, ParsedItem } from './types.js';
+import { safeLink } from './urls.js';
 
 const parser = new XMLParser({
   ignoreAttributes: false,
@@ -53,7 +54,13 @@ export const norm = (s: string | null | undefined): string =>
  * The `v !== null` check is load-bearing: `typeof null === 'object'`, so without
  * it an empty `<guid/>` (which parses to null) throws on the property access.
  */
-const nodeText = (v: XmlText): string => norm(typeof v === 'object' && v !== null ? v['#text'] : v);
+const nodeText = (v: XmlText): string => {
+  const text = typeof v === 'object' && v !== null ? v['#text'] : v;
+  if (Buffer.byteLength(String(text ?? ''), 'utf8') > 64 * 1024) {
+    throw new Error('RSS text field exceeds 64 KiB');
+  }
+  return norm(text);
+};
 
 /**
  * Product codes, e.g. TF3600, TE1300, TC1300, TS6100.
@@ -132,14 +139,16 @@ export function parseFeed(xml: string): { meta: ChannelMeta; items: ParsedItem[]
 
   const meta: ChannelMeta = {
     channel_title: nodeText(channel.title),
-    channel_link: nodeText(channel.link),
+    channel_link: safeLink(nodeText(channel.link)),
     channel_copyright: nodeText(channel.copyright),
     channel_ttl: nodeText(channel.ttl),
-    channel_image: nodeText(channel.image?.url),
+    channel_image: safeLink(nodeText(channel.image?.url)),
     last_build_date: nodeText(channel.lastBuildDate),
   };
 
-  const items = asArray(channel.item)
+  const rawItems = asArray(channel.item);
+  if (rawItems.length > 5000) throw new Error('RSS feed exceeds 5000 items');
+  const items = rawItems
     .map((raw): ParsedItem | null => {
       const title = nodeText(raw.title);
       const guid = nodeText(raw.guid);
@@ -147,6 +156,7 @@ export function parseFeed(xml: string): { meta: ChannelMeta; items: ParsedItem[]
 
       const description = descriptionText(nodeText(raw.description));
       const codes = extractCodes(title);
+      const link = nodeText(raw.link);
 
       return {
         guid,
@@ -156,7 +166,7 @@ export function parseFeed(xml: string): { meta: ChannelMeta; items: ParsedItem[]
         family: codes[0]?.slice(0, 2) ?? null,
         version: extractVersion(description),
         channel: extractChannel(description),
-        link: nodeText(raw.link) || meta.channel_link,
+        link: link ? safeLink(link) : meta.channel_link,
         description,
         pub_date: toEpoch(raw.pubDate),
       };

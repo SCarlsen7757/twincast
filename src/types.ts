@@ -47,6 +47,8 @@ export type MetaBag = Record<string, string | undefined>;
 
 /** What poller.ts holds in memory between requests. */
 export interface StoredSnapshot {
+  contentRevision: string;
+  apiItems: Item[];
   items: ItemWithQr[];
   meta: MetaBag;
   itemCount: number;

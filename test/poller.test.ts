@@ -12,6 +12,7 @@ import {
 import { config, dataDir, loadConfig } from '../src/config.js';
 import { errMessage } from '../src/errors.js';
 import type { ParsedItem } from '../src/types.js';
+import { SINGLE_ITEM_XML } from './fixture.js';
 
 const nowSec = (): number => Math.floor(Date.now() / 1000);
 
@@ -30,8 +31,108 @@ const item = (over: Partial<ParsedItem> = {}): ParsedItem => ({
 });
 
 beforeEach(() => {
+  stopPolling();
   closeDb();
   openDb(':memory:');
+});
+
+test('revision tracks rendered content but excludes polling timestamps', () => {
+  upsertItems([item(), item({ guid: 'second', pub_date: nowSec() - 100 })]);
+  const first = refreshSnapshot().contentRevision;
+  setMeta({ last_checked: nowSec(), last_success: nowSec() });
+  assert.equal(refreshSnapshot().contentRevision, first);
+  upsertItems([item({ guid: 'second', version: '2.0', pub_date: nowSec() - 100 })]);
+  const second = refreshSnapshot().contentRevision;
+  assert.notEqual(second, first);
+  upsertItems([item({ guid: 'new-release', version: '3.0', pub_date: nowSec() + 100 })]);
+  const third = refreshSnapshot().contentRevision;
+  assert.notEqual(third, second);
+  setMeta({ channel_title: 'Changed source' });
+  assert.notEqual(refreshSnapshot().contentRevision, third);
+});
+
+test('QR overflow leaves stored text and the rest of the snapshot usable', () => {
+  upsertItems([item({ link: 'https://example.invalid/' + 'x'.repeat(5000) })]);
+  const snap = refreshSnapshot();
+  assert.equal(snap.items[0]?.name, 'Analytics');
+  assert.equal(snap.items[0]?.qr, '');
+});
+
+test('successful, unchanged and 304 polls recover missing logos', async () => {
+  let attempts = 0;
+  const fetchFeed = async () => ({
+    status: 200 as const,
+    xml: SINGLE_ITEM_XML,
+    etag: 'v1',
+    lastModified: null,
+  });
+  const cacheLogo = async () => {
+    attempts++;
+    return null;
+  };
+  const readLogo = () => null;
+  assert.equal((await pollOnce({ fetchFeed, cacheLogo, readLogo })).status, 'updated');
+  const revision = getSnapshot().contentRevision;
+  assert.equal((await pollOnce({ fetchFeed, cacheLogo, readLogo })).status, 'unchanged');
+  assert.equal(
+    (await pollOnce({ fetchFeed: async () => ({ status: 304 }), cacheLogo, readLogo })).status,
+    'not-modified',
+  );
+  assert.equal(attempts, 3);
+  assert.equal(getSnapshot().contentRevision, revision);
+});
+
+test('storage and refresh errors never discard the previous usable snapshot', async () => {
+  upsertItems([item()]);
+  refreshSnapshot();
+  const previous = getSnapshot();
+  const fail = () => {
+    throw new Error('disk unavailable');
+  };
+  const result = await pollOnce({ getMeta: fail, setMeta: fail, refreshSnapshot: fail });
+  assert.equal(result.status, 'error');
+  assert.deepEqual(getSnapshot().items, previous.items);
+  assert.equal(getSnapshot().lastError, 'disk unavailable');
+});
+
+test('manual callers share a single outstanding request', async () => {
+  let resolve!: (value: { status: 304 }) => void;
+  let calls = 0;
+  const fetchFeed = () => {
+    calls++;
+    return new Promise<{ status: 304 }>((r) => {
+      resolve = r;
+    });
+  };
+  const first = pollOnce({ fetchFeed, readLogo: () => null, cacheLogo: async () => null });
+  const second = pollOnce({ fetchFeed });
+  assert.equal(first, second);
+  assert.equal(calls, 1);
+  resolve({ status: 304 });
+  await first;
+});
+
+test('scheduler is idempotent, waits for completion and stays stopped', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let calls = 0;
+  let finish!: (value: { status: 'unchanged' }) => void;
+  const poll = () => {
+    calls++;
+    return new Promise<{ status: 'unchanged' }>((resolve) => {
+      finish = resolve;
+    });
+  };
+  await startPolling({ immediate: false, poll });
+  await startPolling({ immediate: false, poll });
+  t.mock.timers.tick(config.pollIntervalMin * 60000);
+  assert.equal(calls, 1);
+  t.mock.timers.tick(config.pollIntervalMin * 60000 * 3);
+  assert.equal(calls, 1);
+  stopPolling();
+  finish({ status: 'unchanged' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  t.mock.timers.tick(config.pollIntervalMin * 60000 * 3);
+  assert.equal(calls, 1);
 });
 
 after(() => {
@@ -80,7 +181,9 @@ describe('refreshSnapshot', () => {
     upsertItems(many);
     const snap = refreshSnapshot();
     assert.equal(snap.itemCount, 50);
-    assert.equal(snap.items.length, config.heroCount + config.railCount);
+    assert.equal(snap.items.length, Math.max(config.heroCount, config.railCount));
+    assert.equal(snap.apiItems.length, 50);
+    assert.equal(snap.items[config.heroCount]?.qr, '');
   });
 });
 
@@ -142,6 +245,7 @@ describe('pollOnce never throws', () => {
     config.feedUrl = 'http://127.0.0.1:1/not-a-feed';
     try {
       upsertItems([item({ guid: 'kept' })]);
+      refreshSnapshot();
 
       const r = await pollOnce();
 
@@ -161,11 +265,10 @@ describe('pollOnce never throws', () => {
 });
 
 describe('startPolling and stopPolling', () => {
-  test('start without an immediate poll primes the snapshot and returns a timer', async () => {
+  test('start without an immediate poll primes the snapshot', async () => {
     upsertItems([item({ guid: 'a' })]);
-    const timer = await startPolling({ immediate: false });
+    await startPolling({ immediate: false });
     try {
-      assert.ok(timer, 'a handle is returned so the caller can stop it');
       assert.equal(getSnapshot().itemCount, 1);
     } finally {
       stopPolling();

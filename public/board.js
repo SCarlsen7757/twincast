@@ -10,6 +10,12 @@
   var progress = document.getElementById('progress');
   var clockEl = document.getElementById('clock');
   var updatedEl = document.getElementById('updated');
+  var statusEl = document.getElementById('feed-status');
+  var lastSuccess = Number(body.getAttribute('data-last-success')) || null;
+  var staleAfter = Number(body.getAttribute('data-stale-after')) || 7200;
+  var contentRevision = body.getAttribute('data-content-revision');
+  var offline = false;
+  var checking = false;
 
   var rotateMs = (parseInt(body.getAttribute('data-rotate'), 10) || 12) * 1000;
   var index = 0;
@@ -77,6 +83,22 @@
       var pub = parseInt(nodes[i].getAttribute('data-pub'), 10);
       if (pub) nodes[i].textContent = relDay(pub);
     }
+    refreshFreshness();
+  }
+
+  function refreshFreshness() {
+    var stale = lastSuccess === null || Date.now() / 1000 - lastSuccess > staleAfter;
+    body.setAttribute('data-stale', stale ? '1' : '0');
+    body.setAttribute('data-offline', offline ? '1' : '0');
+    if (updatedEl)
+      updatedEl.textContent =
+        lastSuccess === null ? 'never updated' : 'updated ' + relTime(lastSuccess);
+    if (statusEl)
+      statusEl.textContent = offline
+        ? 'Connection unavailable'
+        : stale
+          ? 'Feed stale'
+          : 'Feed current';
   }
 
   /* ---------- rotation ---------- */
@@ -117,36 +139,53 @@
 
   /* ---------- refresh detection ---------- */
 
-  function currentSignature() {
-    var first = heroes[0];
-    return heroes.length + '|' + (first ? first.querySelector('.hero__name').textContent : '');
-  }
-
-  var signature = currentSignature();
-
   function checkForUpdates() {
-    fetch('/api/news?limit=1', { cache: 'no-store' })
+    if (checking) return;
+    checking = true;
+    var controller = new AbortController();
+    var finished = false;
+    function finish(failed) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      checking = false;
+      offline = failed;
+      refreshFreshness();
+    }
+    var timeout = setTimeout(function () {
+      finish(true);
+      controller.abort();
+    }, 15000);
+    fetch('/api/news?limit=1', { cache: 'no-store', signal: controller.signal })
       .then(function (r) {
-        return r.ok ? r.json() : null;
+        if (!r.ok) throw new Error('Update request failed');
+        return r.json();
       })
       .then(function (data) {
-        if (!data) return;
-        if (updatedEl) {
-          updatedEl.textContent = data.lastSuccess
-            ? 'updated ' + relTime(data.lastSuccess)
-            : 'never updated';
-        }
-        body.setAttribute('data-stale', data.stale ? '1' : '0');
-
-        var newest = data.items && data.items[0];
-        if (newest && newest.name && signature.indexOf(newest.name) === -1) {
+        if (finished) return;
+        if (
+          !data ||
+          typeof data.contentRevision !== 'string' ||
+          !/^[a-f0-9]{64}$/.test(data.contentRevision) ||
+          !(
+            data.lastSuccess === null ||
+            (typeof data.lastSuccess === 'number' &&
+              isFinite(data.lastSuccess) &&
+              data.lastSuccess >= 0)
+          ) ||
+          typeof data.stale !== 'boolean'
+        )
+          throw new Error('Invalid update response');
+        lastSuccess = data.lastSuccess;
+        if (data.contentRevision !== contentRevision) {
           // Server has different content: pick it up on the next wrap so the
           // reload never interrupts an item mid-view.
           pendingReload = true;
         }
+        finish(false);
       })
       .catch(function () {
-        /* offline is fine; the board keeps showing cached data */
+        finish(true);
       });
   }
 
@@ -183,6 +222,15 @@
   }
 
   /* ---------- start ---------- */
+
+  var logo = document.querySelector('.brand__logo');
+  if (logo) {
+    var hideLogo = function () {
+      logo.style.display = 'none';
+    };
+    logo.addEventListener('error', hideLogo);
+    if (logo.complete && logo.naturalWidth === 0) hideLogo();
+  }
 
   tickClock();
   refreshAges();

@@ -6,11 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, normalize, sep } from 'node:path';
 
 import { config } from './config.js';
-import { openDb, closeDb, countItems, getMeta } from './db.js';
+import { openDb, closeDb, countItems } from './db.js';
 import { startPolling, stopPolling, getSnapshot, pollOnce, refreshSnapshot } from './poller.js';
-import { readLogo } from './feed.js';
+import { readLogo, logoContentType } from './feed.js';
 import { renderBoard } from './render.js';
-import type { ItemWithQr, Item } from './types.js';
 
 // Two levels up, not one: this module ships as dist/src/server.js, so '..' is
 // dist/ and '../..' is the package root -- where public/ sits both locally and
@@ -29,9 +28,6 @@ const TYPES: Record<string, string> = {
 
 const COMPRESSIBLE = /^(text\/|application\/(json|javascript)|image\/svg)/;
 
-/** The QR SVG is a rendering detail; the JSON contract does not carry it. */
-const stripQr = ({ qr: _qr, ...rest }: ItemWithQr): Item => rest;
-
 function send(
   req: IncomingMessage,
   res: ServerResponse,
@@ -45,6 +41,8 @@ function send(
     'Content-Type': type,
     'Cache-Control': cacheControl || 'no-store',
     'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy':
+      "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'",
   };
 
   if (
@@ -68,7 +66,7 @@ async function serveStatic(
   pathname: string,
 ): Promise<void> {
   // Resolve inside PUBLIC_DIR only; reject anything that escapes it.
-  const rel = normalize(decodeURIComponent(pathname)).replace(/^([/\\])+/, '');
+  const rel = normalize(pathname).replace(/^([/\\])+/, '');
   const full = join(PUBLIC_DIR, rel);
   if (!full.startsWith(PUBLIC_DIR + sep)) {
     send(req, res, 403, 'text/plain; charset=utf-8', 'forbidden');
@@ -90,9 +88,18 @@ async function serveStatic(
   }
 }
 
-function handle(req: IncomingMessage, res: ServerResponse): void {
-  const url = new URL(req.url ?? '/', 'http://localhost');
-  const p = url.pathname;
+async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  let url: URL;
+  let p: string;
+  try {
+    url = new URL(req.url ?? '/', 'http://localhost');
+    p = decodeURIComponent(url.pathname);
+    if ([...p].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127))
+      throw new URIError('Control character in path');
+  } catch {
+    send(req, res, 400, 'text/plain; charset=utf-8', 'bad request');
+    return;
+  }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     send(req, res, 405, 'text/plain; charset=utf-8', 'method not allowed');
@@ -128,7 +135,8 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
 
   if (p === '/api/news') {
     const snap = getSnapshot();
-    const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 25, 1), 100);
+    const requested = Number(url.searchParams.get('limit'));
+    const limit = Number.isInteger(requested) && requested > 0 ? Math.min(requested, 100) : 25;
     // The data contract the interactive mode will reuse. Never fails: it serves
     // whatever SQLite holds, flagged stale if the feed has not been reachable.
     send(
@@ -147,8 +155,9 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
         lastSuccess: snap.lastSuccess,
         lastChecked: snap.lastChecked,
         lastError: snap.lastError || null,
+        contentRevision: snap.contentRevision,
         itemCount: snap.itemCount,
-        items: snap.items.slice(0, limit).map(stripQr),
+        items: snap.apiItems.slice(0, limit),
       }),
     );
     return;
@@ -160,24 +169,30 @@ function handle(req: IncomingMessage, res: ServerResponse): void {
       send(req, res, 404, 'text/plain; charset=utf-8', 'no logo cached');
       return;
     }
-    const type = getMeta().logo_content_type || 'image/jpeg';
-    send(req, res, 200, type, buf, 'public, max-age=86400');
+    const type = logoContentType(buf);
+    if (!type) {
+      send(req, res, 404, 'text/plain; charset=utf-8', 'no valid logo');
+      return;
+    }
+    send(req, res, 200, type, buf, 'no-cache');
     return;
   }
 
-  void serveStatic(req, res, p);
+  await serveStatic(req, res, p);
 }
 
-const server = createServer((req, res) => {
-  try {
-    handle(req, res);
-  } catch (err) {
-    console.error('[http] handler failed:', err);
-    if (!res.headersSent) send(req, res, 500, 'text/plain; charset=utf-8', 'internal error');
-  }
-});
+export function createBoardServer(): ReturnType<typeof createServer> {
+  return createServer((req, res) => {
+    void handle(req, res).catch((err: unknown) => {
+      console.error('[http] handler failed:', err);
+      if (!res.headersSent) send(req, res, 500, 'text/plain; charset=utf-8', 'internal error');
+      else res.destroy();
+    });
+  });
+}
 
 async function main(): Promise<void> {
+  const server = createBoardServer();
   openDb();
   refreshSnapshot();
 
@@ -202,26 +217,27 @@ async function main(): Promise<void> {
 
   // Don't repeat the poll we already ran above.
   await startPolling({ immediate: config.pollOnStart && !didBootPoll });
+
+  function shutdown(signal: string): void {
+    console.log(`[exit] ${signal}, shutting down`);
+    stopPolling();
+    server.close(() => {
+      closeDb();
+      process.exit(0);
+    });
+    // Don't hang forever on a stuck connection.
+    setTimeout(() => {
+      closeDb();
+      process.exit(0);
+    }, 5000).unref();
+  }
+
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-function shutdown(signal: string): void {
-  console.log(`[exit] ${signal}, shutting down`);
-  stopPolling();
-  server.close(() => {
-    closeDb();
-    process.exit(0);
+if (import.meta.main)
+  main().catch((err) => {
+    console.error('[boot] failed:', err);
+    process.exit(1);
   });
-  // Don't hang forever on a stuck connection.
-  setTimeout(() => {
-    closeDb();
-    process.exit(0);
-  }, 5000).unref();
-}
-
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
-
-main().catch((err) => {
-  console.error('[boot] failed:', err);
-  process.exit(1);
-});

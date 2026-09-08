@@ -35,9 +35,14 @@ describe('qrSvg', () => {
   });
 
   test('auto-sizes for a long payload', () => {
-    const small = qrSvg('a');
-    const large = qrSvg('x'.repeat(300));
+    const small = qrSvg('https://example.invalid/a');
+    const large = qrSvg('https://example.invalid/' + 'x'.repeat(300));
     const size = (s: string): number => Number(/viewBox="0 0 (\d+)/.exec(s)?.[1]);
     assert.ok(size(large) > size(small));
+  });
+
+  test('unsafe and oversized links cannot break rendering', () => {
+    assert.equal(qrSvg('javascript:alert(1)'), '');
+    assert.equal(qrSvg('https://example.invalid/' + 'x'.repeat(5000)), '');
   });
 });

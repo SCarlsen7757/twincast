@@ -1,8 +1,6 @@
-import { existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
-import { config, dataDir } from './config.js';
-import { fetchFeed, cacheLogo } from './feed.js';
+import { config } from './config.js';
+import { fetchFeed, cacheLogo, readLogo, logoDigest } from './feed.js';
 import { parseFeed } from './parse.js';
 import { upsertItems, setMeta, getMeta, getLatest, countItems, openDb } from './db.js';
 import { qrSvg } from './qr.js';
@@ -12,6 +10,8 @@ import type { PollResult, Snapshot, StoredSnapshot } from './types.js';
 const nowSec = () => Math.floor(Date.now() / 1000);
 
 let snapshot: StoredSnapshot = {
+  contentRevision: '',
+  apiItems: [],
   items: [],
   meta: {},
   itemCount: 0,
@@ -25,11 +25,24 @@ let timer: NodeJS.Timeout | null = null;
 /** Rebuild the in-memory view the HTTP layer renders from. */
 export function refreshSnapshot(): StoredSnapshot {
   const meta = getMeta();
-  const items = getLatest(config.heroCount + config.railCount).map((i) => ({
+  const apiItems = getLatest(100);
+  const items = apiItems.slice(0, Math.max(config.heroCount, config.railCount)).map((i, index) => ({
     ...i,
-    qr: qrSvg(i.link),
+    qr: index < config.heroCount ? qrSvg(i.link) : '',
   }));
   snapshot = {
+    contentRevision: createHash('sha256')
+      .update(
+        JSON.stringify({
+          items,
+          title: meta.channel_title,
+          link: meta.channel_link,
+          copyright: meta.channel_copyright,
+          logo: logoDigest(),
+        }),
+      )
+      .digest('hex'),
+    apiItems,
     items,
     meta,
     itemCount: countItems(),
@@ -54,15 +67,50 @@ export function getSnapshot(): Snapshot {
 }
 
 /** Never throws. Returns a short result describing what happened. */
-export async function pollOnce(): Promise<PollResult> {
-  const meta = getMeta();
+const defaults = {
+  fetchFeed,
+  cacheLogo,
+  readLogo,
+  getMeta,
+  setMeta,
+  upsertItems,
+  refreshSnapshot,
+  nowSec,
+};
+type PollDependencies = typeof defaults;
+let inFlight: Promise<PollResult> | null = null;
+
+/** Manual and scheduled callers share one in-flight poll. */
+export function pollOnce(overrides: Partial<PollDependencies> = {}): Promise<PollResult> {
+  if (inFlight) return inFlight;
+  inFlight = performPoll({ ...defaults, ...overrides }).finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
+}
+
+async function recoverLogo(deps: PollDependencies): Promise<void> {
   try {
-    const res = await fetchFeed({ etag: meta.etag, lastModified: meta.last_modified });
-    const checked = nowSec();
+    if (!deps.readLogo()) {
+      const type = await deps.cacheLogo(deps.getMeta().channel_image);
+      if (type) deps.setMeta({ logo_content_type: type });
+    }
+  } catch (err) {
+    console.error('[logo] recovery failed:', errMessage(err));
+  }
+}
+
+async function performPoll(deps: PollDependencies): Promise<PollResult> {
+  const previous = snapshot;
+  try {
+    const meta = deps.getMeta();
+    const res = await deps.fetchFeed({ etag: meta.etag, lastModified: meta.last_modified });
+    const checked = deps.nowSec();
 
     if (res.status === 304) {
-      setMeta({ last_checked: checked, last_success: checked, last_error: '' });
-      refreshSnapshot();
+      deps.setMeta({ last_checked: checked, last_success: checked, last_error: '' });
+      await recoverLogo(deps);
+      deps.refreshSnapshot();
       return { status: 'not-modified' };
     }
 
@@ -72,21 +120,22 @@ export async function pollOnce(): Promise<PollResult> {
     // Pi's SD card. The conditional headers stay in case they enable them later.
     const hash = createHash('sha256').update(res.xml).digest('hex');
     if (hash === meta.body_hash) {
-      setMeta({
+      deps.setMeta({
         etag: res.etag || '',
         last_modified: res.lastModified || '',
         last_checked: checked,
         last_success: checked,
         last_error: '',
       });
-      refreshSnapshot();
+      await recoverLogo(deps);
+      deps.refreshSnapshot();
       return { status: 'unchanged' };
     }
 
     const { meta: channelMeta, items } = parseFeed(res.xml);
-    const added = upsertItems(items);
+    const added = deps.upsertItems(items);
 
-    setMeta({
+    deps.setMeta({
       ...channelMeta,
       etag: res.etag || '',
       last_modified: res.lastModified || '',
@@ -96,46 +145,66 @@ export async function pollOnce(): Promise<PollResult> {
       last_error: '',
     });
 
-    // Best effort, and only when we don't already hold it.
-    if (channelMeta.channel_image && !existsSync(join(dataDir(), 'logo.bin'))) {
-      const type = await cacheLogo(channelMeta.channel_image);
-      if (type) setMeta({ logo_content_type: type });
-    }
-
-    refreshSnapshot();
+    await recoverLogo(deps);
+    deps.refreshSnapshot();
     return { status: 'updated', parsed: items.length, added };
   } catch (err) {
     // A failed poll must never take the board down: keep serving what SQLite has.
-    setMeta({ last_checked: nowSec(), last_error: errMessage(err) });
-    refreshSnapshot();
-    return { status: 'error', error: errMessage(err) };
+    const error = errMessage(err);
+    const checked = deps.nowSec();
+    try {
+      deps.setMeta({ last_checked: checked, last_error: error });
+    } catch {
+      /* Storage may be unavailable. */
+    }
+    snapshot = { ...previous, lastChecked: checked, lastError: error };
+    return { status: 'error', error };
   }
 }
 
 export async function startPolling({
   immediate = config.pollOnStart,
-}: { immediate?: boolean } = {}): Promise<NodeJS.Timeout> {
+  poll = pollOnce,
+}: { immediate?: boolean; poll?: () => Promise<PollResult> } = {}): Promise<void> {
+  if (running) return;
   openDb();
   refreshSnapshot();
+  running = true;
+  const current = ++generation;
+
+  const schedule = () => {
+    if (!running || current !== generation) return;
+    timer = setTimeout(() => {
+      void run();
+    }, config.pollIntervalMin * 60_000);
+    timer.unref();
+  };
 
   const run = async () => {
-    const r = await pollOnce();
-    const at = new Date().toISOString();
-    if (r.status === 'error') console.error(`[poll] ${at} FAILED: ${r.error}`);
-    else if (r.status === 'not-modified') console.log(`[poll] ${at} not modified (304)`);
-    else if (r.status === 'unchanged') console.log(`[poll] ${at} unchanged (same content)`);
-    else console.log(`[poll] ${at} updated: ${r.parsed} parsed, ${r.added} new`);
+    try {
+      const r = await poll();
+      const at = new Date().toISOString();
+      if (r.status === 'error') console.error(`[poll] ${at} FAILED: ${r.error}`);
+      else if (r.status === 'not-modified') console.log(`[poll] ${at} not modified (304)`);
+      else if (r.status === 'unchanged') console.log(`[poll] ${at} unchanged (same content)`);
+      else console.log(`[poll] ${at} updated: ${r.parsed} parsed, ${r.added} new`);
+    } catch (err) {
+      console.error('[poll] unexpected failure:', errMessage(err));
+    } finally {
+      schedule();
+    }
   };
 
   if (immediate) await run();
-  timer = setInterval(() => {
-    void run();
-  }, config.pollIntervalMin * 60_000);
-  timer.unref();
-  return timer;
+  else schedule();
 }
 
+let running = false;
+let generation = 0;
+
 export function stopPolling(): void {
-  if (timer) clearInterval(timer);
+  running = false;
+  generation++;
+  if (timer) clearTimeout(timer);
   timer = null;
 }

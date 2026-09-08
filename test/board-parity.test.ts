@@ -37,6 +37,7 @@ function loadBoardScript(): BoardTime {
     removeAttribute() {},
     querySelector: () => el,
     querySelectorAll: () => [],
+    addEventListener() {},
   };
 
   const win: Record<string, unknown> = {};

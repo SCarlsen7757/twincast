@@ -34,7 +34,11 @@ export default tseslint.config(
   // rather than repo-wide, so the rule keeps its teeth in src/.
   {
     files: ['test/**/*.ts'],
-    rules: { '@typescript-eslint/no-floating-promises': 'off' },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'off',
+      // Async transport doubles intentionally resolve immediately.
+      '@typescript-eslint/require-await': 'off',
+    },
   },
 
   // The board runtime that ships to the browser: ES5, a bare IIFE, served
@@ -54,7 +58,7 @@ export default tseslint.config(
 
   // Root-level tooling config, plain ESM JavaScript.
   {
-    files: ['*.js'],
+    files: ['*.js', 'scripts/*.mjs'],
     extends: [js.configs.recommended],
     languageOptions: { sourceType: 'module', globals: globals.node },
   },

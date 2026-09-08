@@ -1,5 +1,6 @@
 import { config } from './config.js';
 import { familyLabel } from './parse.js';
+import { safeLink } from './urls.js';
 import type { Item, ItemWithQr, Snapshot } from './types.js';
 
 const ESCAPES: Record<string, string> = {
@@ -78,7 +79,7 @@ function heroArticle(item: ItemWithQr, idx: number): string {
     : '';
 
   return `
-    <article class="hero${idx === 0 ? ' is-active' : ''}" data-idx="${idx}">
+    <article class="hero${idx === 0 ? ' is-active' : ''}">
       <div class="hero__body">
         <div class="hero__top">
           ${badge}
@@ -90,8 +91,7 @@ function heroArticle(item: ItemWithQr, idx: number): string {
         <p class="hero__desc">${esc(item.description)}</p>
       </div>
       <div class="hero__foot">
-        <div class="qr">${item.qr || ''}</div>
-        <p class="qr__label">Scan to open<br>the download page</p>
+        ${item.qr && safeLink(item.link) ? `<div class="qr">${item.qr}</div><p class="qr__label">Scan to open<br>the download page</p>` : '<p class="qr__label">Download link unavailable</p>'}
         <p class="when">
           <span class="ago" data-pub="${item.pub_date}">${esc(relDay(item.pub_date))}</span>
           <span class="date">${esc(shortDate(item.pub_date))}</span>
@@ -102,7 +102,7 @@ function heroArticle(item: ItemWithQr, idx: number): string {
 
 function railRow(item: Item, idx: number): string {
   return `
-    <li class="rail__row${idx === 0 ? ' is-active' : ''}" data-idx="${idx}">
+    <li class="rail__row${idx === 0 ? ' is-active' : ''}">
       <span class="rail__code" data-family="${esc(item.family || '')}">${esc(item.codes || '—')}</span>
       <span class="rail__name">${esc(item.name)}</span>
       <span class="rail__meta">
@@ -130,7 +130,7 @@ export function renderBoard(snapshot: Snapshot): string {
 
   const copyright = meta.channel_copyright || 'Beckhoff Automation GmbH & Co. KG';
   const sourceName = meta.channel_title || 'Beckhoff TwinCAT RSS Feed';
-  const sourceLink = meta.channel_link || 'https://www.beckhoff.com/en-en/';
+  const sourceLink = safeLink(meta.channel_link || '') || 'https://www.beckhoff.com/en-en/';
 
   return `<!doctype html>
 <html lang="en">
@@ -143,17 +143,20 @@ export function renderBoard(snapshot: Snapshot): string {
 </head>
 <body
   data-rotate="${config.rotateSeconds}"
-  data-hero-count="${heroes.length}"
+  data-content-revision="${esc(snapshot.contentRevision)}"
+  data-last-success="${snapshot.lastSuccess ?? ''}"
+  data-stale-after="${config.staleAfterMin * 60}"
   data-stale="${snapshot.stale ? '1' : '0'}">
 
 <div class="board">
   <header class="topbar">
     <div class="brand">
-      <img class="brand__logo" src="/logo" alt="" onerror="this.remove()">
+      <img class="brand__logo" src="/logo" alt="">
       <span class="brand__title">${esc(sourceName)}</span>
     </div>
     <div class="status">
-      <span class="status__dot" title="feed status"></span>
+      <span class="status__dot" aria-hidden="true"></span>
+      <span id="feed-status">${snapshot.stale ? 'Feed stale' : 'Feed current'}</span>
       <span class="status__updated" id="updated">${
         snapshot.lastSuccess ? `updated ${esc(relTime(snapshot.lastSuccess))}` : 'never updated'
       }</span>

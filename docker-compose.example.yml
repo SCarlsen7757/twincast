@@ -32,6 +32,8 @@ services:
     image: ghcr.io/scarlsen7757/twincast:${IMAGE_TAG:-latest}
     container_name: twincast
     restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
 
     ports:
       # Needed for Anthias / other screens on the LAN. If you *only* ever reach
@@ -60,7 +62,7 @@ services:
     volumes:
       # SQLite database and the cached feed logo. Keeps release history across
       # restarts and lets the board render when Beckhoff is unreachable.
-      - board-data:/data
+      - ./data:/data
 
     # The healthcheck ships in the image: 200 once releases are stored, 503 while
     # the database is empty.
@@ -88,6 +90,3 @@ services:
     # In the Cloudflare dashboard, set the tunnel's public hostname to route to:
     #   Service: HTTP   URL: board:8080
     # The info screen is then at  https://<your-hostname>/tv
-
-volumes:
-  board-data:

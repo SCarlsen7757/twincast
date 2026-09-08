@@ -5,14 +5,15 @@
 # JavaScript, so there is no reason to run the compiler under QEMU when the
 # target is arm64 for a Raspberry Pi. Only dist/ crosses into the runtime stage,
 # and dist/ is plain .js -- no node_modules from this stage is ever copied out.
-FROM --platform=$BUILDPLATFORM node:24-alpine AS build
+ARG NODE_IMAGE=node:24-alpine
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
 
 WORKDIR /app
 
 # NODE_ENV is left unset here on purpose so `npm ci` installs devDependencies;
 # typescript is the only one the build actually needs.
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --no-audit
 
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
@@ -23,7 +24,7 @@ RUN npm run build
 # from Node's built-in node:sqlite, so the image needs no python3/make/g++ and
 # nothing is compiled at install time. That keeps the arm64 build for a
 # Raspberry Pi fast and toolchain-free.
-FROM node:24-alpine
+FROM ${NODE_IMAGE}
 
 ENV NODE_ENV=production \
     PORT=8080 \
@@ -35,7 +36,13 @@ WORKDIR /app
 # resolves natively for the target platform rather than copying node_modules
 # across from the build stage.
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# Patch base OS packages, then remove package managers that the running board
+# never invokes. This also removes their unrelated dependency attack surface.
+RUN apk upgrade --no-cache \
+    && npm ci --omit=dev --no-audit \
+    && npm cache clean --force \
+    && rm -rf /usr/local/lib/node_modules/npm /opt/yarn-* \
+    && rm -f /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/yarn /usr/local/bin/yarnpkg
 
 # The compiled server. public/ is served as-is and is never compiled, so it is
 # copied from the context rather than from the build stage.
@@ -43,9 +50,8 @@ COPY --from=build /app/dist ./dist
 COPY public ./public
 
 # /data holds the SQLite database and the cached feed logo.
-RUN mkdir -p /data && chown -R node:node /data /app
+RUN mkdir -p /data && chown node:node /data
 USER node
-VOLUME ["/data"]
 
 EXPOSE 8080
 

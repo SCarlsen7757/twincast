@@ -1,9 +1,10 @@
 services:
   board:
     build: .
-    pull_policy: always
     container_name: twincast
     restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
     ports:
       - '8080:8080'
     environment:
@@ -27,7 +28,4 @@ services:
     volumes:
       # SQLite database + cached logo. Keeps history across restarts and lets the
       # board render when Beckhoff is unreachable.
-      - board-data:/data
-
-volumes:
-  board-data:
+      - ./data:/data

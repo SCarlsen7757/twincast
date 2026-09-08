@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+
+# ---- build ------------------------------------------------------------------
+# Pinned to $BUILDPLATFORM deliberately: tsc emits platform-independent
+# JavaScript, so there is no reason to run the compiler under QEMU when the
+# target is arm64 for a Raspberry Pi. Only dist/ crosses into the runtime stage,
+# and dist/ is plain .js -- no node_modules from this stage is ever copied out.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS build
+
+WORKDIR /app
+
+# NODE_ENV is left unset here on purpose so `npm ci` installs devDependencies;
+# typescript is the only one the build actually needs.
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+RUN npm run build
+
+# ---- runtime ----------------------------------------------------------------
+# node:24-alpine deliberately: it is the current Active LTS, and SQLite comes
+# from Node's built-in node:sqlite, so the image needs no python3/make/g++ and
+# nothing is compiled at install time. That keeps the arm64 build for a
+# Raspberry Pi fast and toolchain-free.
+FROM node:24-alpine
+
+ENV NODE_ENV=production \
+    PORT=8080 \
+    DB_PATH=/data/board.db
+
+WORKDIR /app
+
+# Runtime dependencies only -- typescript, eslint and prettier never ship. This
+# resolves natively for the target platform rather than copying node_modules
+# across from the build stage.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# The compiled server. public/ is served as-is and is never compiled, so it is
+# copied from the context rather than from the build stage.
+COPY --from=build /app/dist ./dist
+COPY public ./public
+
+# /data holds the SQLite database and the cached feed logo.
+RUN mkdir -p /data && chown -R node:node /data /app
+USER node
+VOLUME ["/data"]
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=60s --timeout=5s --start-period=30s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+# --enable-source-maps so the sourceMap output actually improves stack traces.
+CMD ["node", "--enable-source-maps", "dist/src/server.js"]

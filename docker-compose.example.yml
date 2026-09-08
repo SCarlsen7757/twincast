@@ -1,0 +1,93 @@
+# Example deployment: pulls the published GHCR image (no local build) and puts a
+# Cloudflare tunnel in front of it for remote access.
+#
+#   cp .env.example .env      # then edit it, at minimum USER_AGENT
+#
+#   docker compose -f docker-compose.example.yml up -d
+#       board only, reachable on the LAN
+#
+#   docker compose -f docker-compose.example.yml --profile tunnel up -d
+#       board plus the Cloudflare tunnel (see the warning below)
+#
+# Point Anthias at  http://<host>:8080/tv  over the LAN.
+#
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE ENABLING THE TUNNEL
+#
+# A Cloudflare tunnel publishes this board to the public internet. The board
+# redisplays Beckhoff's copyrighted feed content, and Beckhoff grants no reuse
+# licence -- the position this project takes is that it is an *internal* display
+# (see THIRD-PARTY-LICENSES.md). Putting it on a public hostname changes that.
+#
+# If you use the tunnel, put Cloudflare Access in front of the hostname so only
+# your people can reach it:
+#   Zero Trust -> Access -> Applications -> Add a self-hosted application
+#   -> your hostname -> policy: Emails ending in @yourdomain
+#
+# Without an Access policy the hostname is open to anyone who finds it.
+# ---------------------------------------------------------------------------
+
+services:
+  board:
+    image: ghcr.io/scarlsen7757/twincast:${IMAGE_TAG:-latest}
+    container_name: twincast
+    restart: unless-stopped
+
+    ports:
+      # Needed for Anthias / other screens on the LAN. If you *only* ever reach
+      # the board through the tunnel, replace this with `expose: ["8080"]` so it
+      # is not bound on the host at all.
+      - '${BOARD_PORT:-8080}:8080'
+
+    environment:
+      TZ: ${TZ:-Europe/Copenhagen}
+
+      FEED_URL: ${FEED_URL:-https://www.beckhoff.com/english/rss/beckhoff-twincat-rss-feed.xml}
+      POLL_INTERVAL_MIN: ${POLL_INTERVAL_MIN:-30}
+      POLL_ON_START: ${POLL_ON_START:-true}
+
+      # Beckhoff's WAF rejects `curl/*` with 403 but accepts a self-identifying
+      # agent. Put a real contact in it so they can reach you instead of guessing.
+      USER_AGENT: ${USER_AGENT:?set USER_AGENT in .env, including a contact address}
+
+      # Defaults are tuned for a 5-minute Anthias slot:
+      # 6 items x 25s = a 150s cycle = exactly two cycles per showing.
+      HERO_COUNT: ${HERO_COUNT:-6}
+      RAIL_COUNT: ${RAIL_COUNT:-8}
+      ROTATE_SECONDS: ${ROTATE_SECONDS:-25}
+      STALE_AFTER_MIN: ${STALE_AFTER_MIN:-120}
+
+    volumes:
+      # SQLite database and the cached feed logo. Keeps release history across
+      # restarts and lets the board render when Beckhoff is unreachable.
+      - board-data:/data
+
+    # The healthcheck ships in the image: 200 once releases are stored, 503 while
+    # the database is empty.
+
+  # Opt-in: this service only starts with `--profile tunnel`, so the board runs
+  # on its own by default. Compose interpolates the whole file regardless of
+  # profiles, so the token deliberately has no `:?` guard -- requiring it would
+  # break `docker compose up` for anyone who just wants the board on the LAN.
+  cloudflared:
+    profiles: ['tunnel']
+    image: cloudflare/cloudflared:latest
+    container_name: twincast-tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+
+    # Deliberately `service_started`, not `service_healthy`. The board reports
+    # unhealthy until its first successful poll, so gating on health would leave
+    # the tunnel down whenever the feed is unreachable at boot -- exactly when you
+    # most want to be able to look at the screen remotely.
+    depends_on:
+      - board
+
+    # In the Cloudflare dashboard, set the tunnel's public hostname to route to:
+    #   Service: HTTP   URL: board:8080
+    # The info screen is then at  https://<your-hostname>/tv
+
+volumes:
+  board-data:

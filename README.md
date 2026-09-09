@@ -104,7 +104,7 @@ tunnel's public hostname to **Service: HTTP, URL: `board:8080`**.
 
 ### Locally
 
-Use Node 24.2 or newer (Node 24 LTS is used in CI and Docker).
+Use Node 26.8.1 or newer (Node 26 is used in CI and Docker).
 
 ```bash
 npm install

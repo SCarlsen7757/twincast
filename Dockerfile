@@ -5,7 +5,7 @@
 # JavaScript, so there is no reason to run the compiler under QEMU when the
 # target is arm64 for a Raspberry Pi. Only dist/ crosses into the runtime stage,
 # and dist/ is plain .js -- no node_modules from this stage is ever copied out.
-ARG NODE_IMAGE=node:24-alpine
+ARG NODE_IMAGE=node:26-alpine
 FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS build
 
 WORKDIR /app
@@ -20,7 +20,7 @@ COPY src ./src
 RUN npm run build
 
 # ---- runtime ----------------------------------------------------------------
-# node:24-alpine deliberately: it is the current Active LTS, and SQLite comes
+# node:26-alpine matches the runtime and types validated in CI. SQLite comes
 # from Node's built-in node:sqlite, so the image needs no python3/make/g++ and
 # nothing is compiled at install time. That keeps the arm64 build for a
 # Raspberry Pi fast and toolchain-free.

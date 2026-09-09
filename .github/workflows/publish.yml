@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
       - name: Validate version and resolve image tags
         id: release
@@ -42,9 +42,26 @@ jobs:
         id: base
         shell: bash
         run: |
-          digest=$(docker buildx imagetools inspect node:24-alpine --format '{{json .Manifest}}' | jq -r '.digest')
+          digest=$(docker buildx imagetools inspect node:26-alpine --format '{{json .Manifest}}' | jq -r '.digest')
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=node:24-alpine@$digest" >> "$GITHUB_OUTPUT"
+          echo "image=node:26-alpine@$digest" >> "$GITHUB_OUTPUT"
+
+  minimum-node:
+    name: Check minimum Node (26.8.1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 26.8.1
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npm audit --audit-level=high
 
   smoke:
     name: Smoke and scan (${{ matrix.arch }})
@@ -61,7 +78,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: 26
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -89,7 +106,7 @@ jobs:
   publish:
     name: Publish checked release to GHCR
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [checks, smoke]
+    needs: [checks, minimum-node, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
